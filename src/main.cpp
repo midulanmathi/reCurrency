@@ -1,0 +1,1114 @@
+#include "crow_all.h"
+#include "json.hpp"
+#include <iostream>
+#include <fstream>
+#include <map>
+#include <string>
+#include <ctime>
+#include <vector>
+#include <algorithm>
+#include <deque>
+#include <iomanip>
+#include <cmath>
+
+using json = nlohmann::json;
+
+// --- CONSTANTS ---
+const long long DAY_SEC = 86400;
+const long long HALF_DAY = 43200; // 12 Hours
+const long long VIRTUE_REWARD = HALF_DAY; 
+const long long ACTION_COOLDOWN = 72000;     // 20 Hours
+const std::string DB_FILE = "db.json";
+
+// --- DATA STRUCTURES ---
+
+struct ActivityLog {
+    std::string user_name;
+    std::string action; 
+    std::string message;
+    time_t timestamp;
+    std::string color; 
+};
+
+struct User {
+    std::string name;
+    std::string id;
+    std::string password;
+    
+    std::string vice;
+    double target_interval_days;
+    
+    std::string virtue1_name;
+    double promised_v1_weekly;
+    std::string virtue2_name;
+    double promised_v2_weekly;
+
+    long long base_cost;     
+    long long max_threshold; 
+    
+    long long debt_seconds;
+    time_t last_update;      
+    time_t last_v1;
+    time_t last_v2;
+    time_t lock_time;
+    bool locked;
+    int streak;              
+
+    User() : debt_seconds(0), last_update(std::time(nullptr)), last_v1(0), last_v2(0), lock_time(0), locked(false), streak(0) {}
+
+    User(std::string n, std::string p, std::string v, double days, std::string v1n, double v1f, std::string v2n, double v2f) 
+        : name(n), password(p), vice(v), target_interval_days(days), 
+          virtue1_name(v1n), promised_v1_weekly(v1f), virtue2_name(v2n), promised_v2_weekly(v2f),
+          debt_seconds(0), last_update(std::time(nullptr)), last_v1(0), last_v2(0), lock_time(0), locked(false), streak(0)
+    {
+        id = n;
+        std::transform(id.begin(), id.end(), id.begin(), ::tolower);
+        calculate_math();
+    }
+
+    void calculate_math() {
+        long long natural_decay = (long long)(target_interval_days * DAY_SEC);
+        double weeks_in_interval = target_interval_days / 7.0;
+        double total_virtues = weeks_in_interval * (promised_v1_weekly + promised_v2_weekly);
+        double raw_work_capacity = total_virtues * (double)VIRTUE_REWARD;
+        double raw_total = (double)natural_decay + raw_work_capacity;
+        long long blocks = (long long)std::round(raw_total / (double)HALF_DAY);
+        base_cost = blocks * HALF_DAY;
+        if (base_cost < natural_decay) base_cost = natural_decay;
+        max_threshold = (long long)(base_cost * 2.5);
+    }
+};
+
+std::map<std::string, User> users;
+std::deque<ActivityLog> activity_feed; 
+
+std::string get_user_color(const std::string& name) {
+    std::hash<std::string> hasher;
+    size_t hash = hasher(name);
+    int hue = hash % 360;
+    return "hsl(" + std::to_string(hue) + ", 70%, 60%)";
+}
+
+// --- DATABASE FUNCTIONS ---
+
+void save_db() {
+    json j;
+    j["users"] = json::object();
+    for (auto const& [key, user] : users) {
+        j["users"][key] = {
+            {"name", user.name},
+            {"password", user.password},
+            {"vice", user.vice},
+            {"target_interval_days", user.target_interval_days},
+            {"virtue1_name", user.virtue1_name},
+            {"promised_v1_weekly", user.promised_v1_weekly},
+            {"virtue2_name", user.virtue2_name},
+            {"promised_v2_weekly", user.promised_v2_weekly},
+            {"base_cost", user.base_cost},
+            {"max_threshold", user.max_threshold},
+            {"debt_seconds", user.debt_seconds},
+            {"last_update", user.last_update},
+            {"last_v1", user.last_v1},
+            {"last_v2", user.last_v2},
+            {"lock_time", user.lock_time},
+            {"locked", user.locked},
+            {"streak", user.streak}
+        };
+    }
+    j["logs"] = json::array();
+    for (const auto& log : activity_feed) {
+        j["logs"].push_back({
+            {"user", log.user_name},
+            {"action", log.action},
+            {"msg", log.message},
+            {"ts", log.timestamp},
+            {"col", log.color}
+        });
+    }
+    std::ofstream o(DB_FILE);
+    o << j.dump(4);
+}
+
+void load_db() {
+    std::ifstream i(DB_FILE);
+    if (!i.is_open()) return;
+    json j;
+    i >> j;
+    users.clear();
+    for (auto& [key, val] : j["users"].items()) {
+        User u;
+        u.name = val["name"];
+        u.id = key; 
+        u.password = val["password"];
+        u.vice = val.value("vice", "Vice");
+        u.target_interval_days = val.value("target_interval_days", 7.0);
+        u.virtue1_name = val.value("virtue1_name", "Virtue 1");
+        u.promised_v1_weekly = val.value("promised_v1_weekly", 3.0);
+        u.virtue2_name = val.value("virtue2_name", "Virtue 2");
+        u.promised_v2_weekly = val.value("promised_v2_weekly", 5.0);
+        u.base_cost = val.value("base_cost", 10 * DAY_SEC);
+        u.max_threshold = val.value("max_threshold", 25 * DAY_SEC);
+        u.debt_seconds = val["debt_seconds"];
+        u.last_update = val["last_update"];
+        u.last_v1 = val.value("last_v1", 0);
+        u.last_v2 = val.value("last_v2", 0);
+        u.lock_time = val.value("lock_time", 0);
+        u.locked = val["locked"];
+        u.streak = val.value("streak", 0);
+        users[key] = u;
+    }
+    activity_feed.clear();
+    if (j.contains("logs")) {
+        for (const auto& l : j["logs"]) {
+            ActivityLog log;
+            log.user_name = l["user"];
+            log.action = l["action"];
+            log.message = l["msg"];
+            log.timestamp = l["ts"];
+            log.color = l["col"];
+            activity_feed.push_back(log);
+        }
+    }
+}
+
+// --- LOGIC FUNCTIONS ---
+
+void add_log(std::string user, std::string action, std::string msg, std::string color) {
+    ActivityLog log;
+    log.user_name = user;
+    log.action = action;
+    log.message = msg;
+    log.timestamp = std::time(nullptr);
+    log.color = color;
+    activity_feed.push_front(log); 
+    if (activity_feed.size() > 100) activity_feed.pop_back(); 
+    save_db();
+}
+
+void update_decay(User& u) {
+    if (u.locked) return;
+    time_t now = std::time(nullptr);
+    long long seconds_passed = (long long)std::difftime(now, u.last_update);
+    if (u.debt_seconds > 0) {
+        u.debt_seconds -= seconds_passed;
+        if (u.debt_seconds < 0) u.debt_seconds = 0;
+    }
+    u.last_update = now;
+}
+
+void add_vice(User& u) {
+    update_decay(u);
+    if (u.locked) return;
+    long long cost = u.base_cost;
+    if (u.debt_seconds > 0) {
+        cost = (long long)(u.base_cost * 1.5);
+    }
+    u.debt_seconds += cost;
+    u.streak = 0; 
+    double days = (double)cost / (double)DAY_SEC;
+    std::stringstream ss;
+    ss << std::fixed << std::setprecision(1) << days;
+    std::string msg = "Indulged in " + u.vice + " (+" + ss.str() + "d)";
+    add_log(u.name, "vice", msg, "#ff5252");
+    if (u.debt_seconds > u.max_threshold) {
+        u.locked = true;
+        u.lock_time = std::time(nullptr);
+        add_log(u.name, "locked", "WENT BANKRUPT.", "#ff0000");
+    }
+    save_db();
+}
+
+bool perform_virtue(User& u, int virtue_num) {
+    update_decay(u);
+    if (u.locked) return false;
+    time_t now = std::time(nullptr);
+    time_t* last_track = (virtue_num == 1) ? &u.last_v1 : &u.last_v2;
+    std::string v_name = (virtue_num == 1) ? u.virtue1_name : u.virtue2_name;
+    if (std::difftime(now, *last_track) < ACTION_COOLDOWN) return false;
+    if (u.debt_seconds > 0) {
+        u.debt_seconds -= VIRTUE_REWARD;
+        if (u.debt_seconds < 0) u.debt_seconds = 0;
+    }
+    *last_track = now;
+    std::string col = (virtue_num == 1) ? "#2196F3" : "#9c27b0";
+    add_log(u.name, "virtue", "Completed: " + v_name + " (-12h)", col);
+    save_db();
+    return true;
+}
+
+void reset_user(User& u, std::string verifier) {
+    time_t now = std::time(nullptr);
+    long long time_served = (long long)std::difftime(now, u.lock_time);
+    u.debt_seconds = u.base_cost - time_served;
+    if (u.debt_seconds < 0) u.debt_seconds = 0;
+    u.locked = false;
+    u.last_update = now;
+    u.streak++; 
+    add_log(u.name, "reset", "Bailed out by " + verifier + ".", "#4CAF50");
+    save_db();
+}
+
+std::string get_logged_in_user(const crow::request& req) {
+    std::string cookie_val = req.get_header_value("Cookie");
+    if (cookie_val.find("user=") != std::string::npos) {
+        std::string name = cookie_val.substr(cookie_val.find("user=") + 5);
+        size_t end = name.find(';');
+        if (end != std::string::npos) name = name.substr(0, end);
+        std::string decoded_name = name;
+        std::replace(decoded_name.begin(), decoded_name.end(), '+', ' ');
+        std::string lower_id = decoded_name;
+        std::transform(lower_id.begin(), lower_id.end(), lower_id.begin(), ::tolower);
+        if (users.find(lower_id) != users.end()) return lower_id;
+    }
+    return "";
+}
+
+std::string get_form_value(const std::string& body, const std::string& key) {
+    std::string search = key + "=";
+    size_t start = body.find(search);
+    if (start == std::string::npos) return "";
+    start += search.length();
+    size_t end = body.find('&', start);
+    if (end == std::string::npos) end = body.length();
+    std::string val = body.substr(start, end - start);
+    std::replace(val.begin(), val.end(), '+', ' ');
+    return val;
+}
+
+bool is_same_day(time_t t1, time_t t2) {
+    struct tm* tm1 = std::localtime(&t1);
+    struct tm tm1_copy = *tm1; 
+    struct tm* tm2 = std::localtime(&t2);
+    return (tm1_copy.tm_year == tm2->tm_year && tm1_copy.tm_yday == tm2->tm_yday);
+}
+
+std::string get_day_name(time_t t) {
+    char buffer[10];
+    struct tm* tm_info = std::localtime(&t);
+    strftime(buffer, 10, "%a", tm_info); 
+    return std::string(buffer);
+}
+
+// --- HTML RENDERERS ---
+
+std::string render_calendar(const std::string& username) {
+    time_t now = std::time(nullptr);
+    std::string html = "<div style='display:flex; justify-content:space-between; margin-top:15px; background:#161616; padding:10px; border-radius:8px;'>";
+    for (int i = 6; i >= 0; i--) {
+        time_t day_time = now - (i * 86400);
+        std::string day_label = (i == 0) ? "Today" : get_day_name(day_time);
+        bool has_vice = false;
+        int virtue_count = 0;
+        for (const auto& log : activity_feed) {
+            if (log.user_name == username) {
+                if (is_same_day(log.timestamp, day_time)) {
+                    if (log.action == "vice") has_vice = true;
+                    if (log.action == "virtue") virtue_count++;
+                }
+            }
+        }
+        html += "<div style='text-align:center; flex:1; display:flex; flex-direction:column; align-items:center;'>";
+        html += "<div style='font-size:0.65em; color:#666; margin-bottom:5px; text-transform:uppercase;'>" + day_label + "</div>";
+        html += "<div style='background:#222; width:30px; height:40px; border-radius:4px; display:flex; flex-direction:column; justify-content:flex-end; align-items:center; padding:3px; gap:2px;'>";
+            
+            if (virtue_count > 0) {
+                for(int k=0; k<std::min(virtue_count, 4); k++) {
+                    html += "<div style='width:6px; height:6px; background:#4CAF50; border-radius:50%;'></div>";
+                }
+            } else if (!has_vice) {
+                html += "<div style='width:4px; height:4px; background:#333; border-radius:50%; margin-bottom:auto; margin-top:auto;'></div>";
+            }
+
+            if (has_vice) {
+                html += "<div style='width:6px; height:6px; background:#ff5252; border-radius:50%; margin-top:2px;'></div>";
+            }
+
+        html += "</div></div>";
+    }
+    html += "</div>";
+    return html;
+}
+
+std::string render_signup_wizard(std::string error = "") {
+    std::string html = R"=====(
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+        <meta name="theme-color" content="#121212">
+        <title>The Pledge</title>
+        <style>
+            body { background: #121212; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+            .box { background: #1e1e1e; padding: 40px; border-radius: 16px; width: 420px; border: 1px solid #333; box-shadow: 0 10px 40px rgba(0,0,0,0.6); }
+            h2 { color: #fff; text-align: center; margin-top: 0; letter-spacing: 2px; text-transform:uppercase; font-size:1.4em; margin-bottom: 20px;}
+            
+            .step { display: none; }
+            .step.active { display: block; animation: fadein 0.4s; }
+            
+            label { font-size: 0.75em; color: #888; text-transform: uppercase; letter-spacing: 1px; display: block; margin-bottom: 8px; font-weight:700;}
+            
+            .input-wrapper { margin-bottom: 20px; }
+            input, select { width: 100%; padding: 16px; background: #2c2c2c; border: 1px solid #444; color: white; border-radius: 8px; box-sizing: border-box; font-size: 1.1em; transition:0.2s; -webkit-appearance: none; }
+            input:focus, select:focus { border-color: #4CAF50; outline: none; background: #333; }
+            
+            input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+            input[type=number] { -moz-appearance: textfield; }
+
+            .combo-input { display: flex; gap: 10px; align-items: baseline; }
+            .combo-input input { flex: 1; text-align:center; }
+            .slash { font-size: 1.5em; color: #444; font-weight: 300; }
+            .combo-input select { flex: 2; text-align:center; text-align-last:center; }
+
+            .dynamic-text { font-size:0.85em; color:#888; margin-top:10px; text-align:center; font-style: italic; min-height: 1.2em; transition: color 0.3s; }
+
+            p.desc { font-size: 0.95em; line-height: 1.6; color: #bbb; margin-bottom: 30px; text-align:left; }
+            
+            .btn-row { display: flex; justify-content: space-between; margin-top: 30px; }
+            button { padding: 14px 24px; background: #4CAF50; border: none; color: white; font-weight: bold; cursor: pointer; border-radius: 8px; font-size: 1em; text-transform:uppercase; letter-spacing:1px; }
+            button.secondary { background: transparent; border: 1px solid #444; color: #888; }
+            button.secondary:hover { border-color: #666; color: #ccc; }
+            
+            .review-item { background: #252525; padding: 15px; border-radius: 8px; margin-bottom: 10px; border-left: 3px solid #4CAF50; }
+            .review-label { font-size: 0.7em; color: #666; text-transform: uppercase; }
+            .review-val { font-size: 1.1em; color: #fff; font-weight: bold; }
+            .review-sub { font-size:0.9em; color:#888; }
+            
+            @keyframes fadein { from { opacity:0; transform:translateY(5px); } to { opacity:1; transform:translateY(0); } }
+            .error { background: #3d1a1a; color: #ff9898; padding: 12px; border-radius: 8px; margin-bottom: 20px; text-align: center; border: 1px solid #5e2a2a; }
+            .info-icon { display:inline-block; width:14px; height:14px; border:1px solid #555; color:#555; border-radius:50%; text-align:center; line-height:13px; font-size:0.75em; margin-left:6px; cursor:help; }
+        </style>
+        <script>
+            let currentStep = 1;
+            function showStep(n) {
+                document.querySelectorAll('.step').forEach(s => s.classList.remove('active'));
+                document.getElementById('step' + n).classList.add('active');
+                currentStep = n;
+                if (n === 4) populateReview();
+                
+                if (n === 2) updateText('I will indulge', 'vice');
+                if (n === 3) { updateText('I will complete this goal', 'v1'); updateText('I will complete this goal', 'v2'); }
+            }
+            function next() { showStep(currentStep + 1); }
+            function back() { showStep(currentStep - 1); }
+
+            function numToWord(n) {
+                const words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+                if (n >= 0 && n <= 10) return words[n];
+                return n;
+            }
+
+            function updateText(prefix, id) {
+                let freq = parseInt(document.getElementById(id + '-freq').value);
+                let sel = document.getElementById(id + '-per');
+                let per = sel.options[sel.selectedIndex].text;
+                
+                let countWord = numToWord(freq);
+                let timeStr = (freq === 1) ? "time" : "times";
+                let perStr = per.toLowerCase();
+                
+                document.getElementById(id + '-text').innerHTML = prefix + " <b style='color:#ccc'>" + countWord + " " + timeStr + "</b> per " + perStr;
+            }
+
+            function populateReview() {
+                document.getElementById('r-name').innerText = document.querySelector('input[name="name"]').value;
+                let vice = document.querySelector('input[name="vice"]').value;
+                document.getElementById('r-vice').innerText = vice;
+                
+                let viceFreq = document.getElementById('vice-freq').value;
+                let vicePer = document.getElementById('vice-per').options[document.getElementById('vice-per').selectedIndex].text.toLowerCase();
+                document.getElementById('r-days').innerText = viceFreq + "x / " + vicePer;
+
+                let v1 = document.querySelector('input[name="v1name"]').value;
+                let v1f = document.getElementById('v1-freq').value;
+                let v1p = document.getElementById('v1-per').options[document.getElementById('v1-per').selectedIndex].text.toLowerCase();
+                
+                let v2 = document.querySelector('input[name="v2name"]').value;
+                let v2f = document.getElementById('v2-freq').value;
+                let v2p = document.getElementById('v2-per').options[document.getElementById('v2-per').selectedIndex].text.toLowerCase();
+
+                document.getElementById('r-v1').innerText = v1;
+                document.getElementById('r-v1-sub').innerText = v1f + "x / " + v1p;
+                document.getElementById('r-v2').innerText = v2;
+                document.getElementById('r-v2-sub').innerText = v2f + "x / " + v2p;
+            }
+        </script>
+    </head>
+    <body>
+        <div class="box">
+            <form action="/signup" method="POST">
+                )=====";
+                if (!error.empty()) html += "<div class='error'>" + error + "</div>";
+                html += R"=====(
+                
+                <div id="step1" class="step active">
+                    <h2>THE RECURRENCY MODEL</h2>
+                    <p class="desc">
+                        Moderation is not deprivation. It is the act of <b>earning</b> your vices through virtues.<br><br>
+                        1. Define the one habit you must control.<br>
+                        2. Define the positive habits that pay for it.<br>
+                        3. Execute the contract to maintain balance.
+                    </p>
+                    <div class="input-wrapper">
+                        <label>Who are you?</label>
+                        <input type="text" name="name" placeholder="Name" required autocomplete="off">
+                    </div>
+                    <div class="input-wrapper">
+                        <label>Secure Key</label>
+                        <input type="password" name="password" placeholder="Password" required>
+                    </div>
+                    <div class="btn-row" style="justify-content:center">
+                        <button type="button" onclick="next()">Start Pledge</button>
+                    </div>
+                    <div style="text-align:center; margin-top:20px"><a href="/login" style="color:#666; text-decoration:none; font-size:0.8em; text-transform:uppercase;">Back to Login</a></div>
+                </div>
+
+                <div id="step2" class="step">
+                    <h2>The Vice</h2>
+                    <p class="desc">What is the primary habit you need to moderate? Be honest about a schedule you can actually sustain.</p>
+                    
+                    <div class="input-wrapper">
+                        <label title="The specific activity (e.g. Smoking Weed, Ordering UberEats)">Vice Name <span class="info-icon">?</span></label>
+                        <input type="text" name="vice" placeholder="e.g. Weed" required>
+                    </div>
+                    
+                    <div class="input-wrapper">
+                        <label title="Your maximum allowed indulgence rate.">Schedule Limit <span class="info-icon">?</span></label>
+                        <div class="combo-input">
+                            <input type="number" id="vice-freq" name="vice_freq" value="1" min="1" oninput="updateText('I will indulge', 'vice')">
+                            <div class="slash">/</div>
+                            <select id="vice-per" name="vice_per" onchange="updateText('I will indulge', 'vice')">
+                                <option value="1">Day</option>
+                                <option value="7" selected>Week</option>
+                                <option value="30">Month</option>
+                                <option value="365">Year</option>
+                            </select>
+                        </div>
+                        <div id="vice-text" class="dynamic-text">I will indulge one time per week</div>
+                    </div>
+                    
+                    <div class="btn-row">
+                        <button type="button" class="secondary" onclick="back()">Back</button>
+                        <button type="button" onclick="next()">Next</button>
+                    </div>
+                </div>
+
+                <div id="step3" class="step">
+                    <h2>The Virtues</h2>
+                    <p class="desc">Select two productive habits. Consistent performance here is the only way to earn time off your debt.</p>
+                    
+                    <div class="input-wrapper">
+                        <label title="A daily/weekly positive habit (e.g. Gym)">Virtue #1 <span class="info-icon">?</span></label>
+                        <input type="text" name="v1name" placeholder="e.g. Gym" required>
+                        <div class="combo-input" style="margin-top:5px">
+                            <input type="number" id="v1-freq" name="v1_freq" value="3" min="1" oninput="updateText('I will complete this goal', 'v1')">
+                            <div class="slash">/</div>
+                            <select id="v1-per" name="v1_per" onchange="updateText('I will complete this goal', 'v1')">
+                                <option value="1">Day</option>
+                                <option value="7" selected>Week</option>
+                            </select>
+                        </div>
+                        <div id="v1-text" class="dynamic-text">I will complete this goal three times per week</div>
+                    </div>
+
+                    <div class="input-wrapper">
+                        <label title="Another positive habit (e.g. Studying, Cleaning)">Virtue #2 <span class="info-icon">?</span></label>
+                        <input type="text" name="v2name" placeholder="e.g. Study" required>
+                        <div class="combo-input" style="margin-top:5px">
+                            <input type="number" id="v2-freq" name="v2_freq" value="5" min="1" oninput="updateText('I will complete this goal', 'v2')">
+                            <div class="slash">/</div>
+                            <select id="v2-per" name="v2_per" onchange="updateText('I will complete this goal', 'v2')">
+                                <option value="1">Day</option>
+                                <option value="7" selected>Week</option>
+                            </select>
+                        </div>
+                        <div id="v2-text" class="dynamic-text">I will complete this goal five times per week</div>
+                    </div>
+
+                    <div class="btn-row">
+                        <button type="button" class="secondary" onclick="back()">Back</button>
+                        <button type="button" onclick="next()">Next</button>
+                    </div>
+                </div>
+
+                <div id="step4" class="step">
+                    <h2>The Pledge</h2>
+                    <p class="desc" style="margin-bottom:15px">I, <span id="r-name" style="color:#fff; font-weight:bold"></span>, hereby agree to the following terms of moderation:</p>
+                    
+                    <div class="review-item">
+                        <div class="review-label">Moderating</div>
+                        <div class="review-val" id="r-vice">...</div>
+                        <div class="review-sub" id="r-days">...</div>
+                    </div>
+                    
+                    <div class="review-item" style="border-left-color: #2196F3">
+                        <div class="review-label">Powered By</div>
+                        <div class="review-val" id="r-v1">...</div>
+                        <div class="review-sub" id="r-v1-sub" style="margin-bottom:8px">...</div>
+                        
+                        <div class="review-val" id="r-v2">...</div>
+                        <div class="review-sub" id="r-v2-sub">...</div>
+                    </div>
+
+                    <div class="btn-row">
+                        <button type="button" class="secondary" onclick="back()">Back</button>
+                        <button type="submit">Sign Contract</button>
+                    </div>
+                </div>
+
+            </form>
+        </div>
+    </body>
+    </html>
+    )=====";
+    return html;
+}
+
+std::string render_edit_page(const User& u) {
+    // UPDATED EDIT PAGE WITH COMBO INPUTS
+    std::string html = R"=====(
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Edit Contract</title>
+        <style>
+            body { background: #121212; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+            .box { background: #1e1e1e; padding: 40px; border-radius: 16px; width: 400px; border: 1px solid #333; }
+            h2 { color: #4CAF50; text-align: center; margin-top: 0; text-transform:uppercase; letter-spacing:1px; }
+            
+            label { font-size: 0.75em; color: #888; text-transform: uppercase; letter-spacing: 1px; display: block; margin-bottom: 5px; font-weight:700;}
+            
+            .input-wrapper { margin-bottom: 20px; }
+            input, select { width: 100%; padding: 14px; background: #2c2c2c; border: 1px solid #444; color: white; border-radius: 8px; box-sizing: border-box; font-size: 1.1em; -webkit-appearance: none; }
+            
+            /* Combo Styles */
+            .combo-input { display: flex; gap: 10px; align-items: baseline; }
+            .combo-input input { flex: 1; text-align:center; }
+            .slash { font-size: 1.5em; color: #444; font-weight: 300; }
+            .combo-input select { flex: 2; text-align:center; text-align-last:center; }
+
+            /* Hide Spinners */
+            input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+            input[type=number] { -moz-appearance: textfield; }
+            
+            button { width: 100%; padding: 14px; background: #4CAF50; border: none; color: white; font-weight: bold; cursor: pointer; border-radius: 8px; margin-top: 10px; font-size: 1em; text-transform:uppercase; letter-spacing:1px; }
+            a { display:block; text-align:center; margin-top:15px; color:#666; text-decoration:none; text-transform:uppercase; font-size:0.8em; }
+        </style>
+    </head>
+    <body>
+        <div class="box">
+            <h2>Amend Contract</h2>
+            <form action="/edit" method="POST">
+                
+                <div class="input-wrapper">
+                    <label>Vice Name</label>
+                    <input type="text" name="vice" value=")=====" + u.vice + R"=====(">
+                </div>
+                
+                <div class="input-wrapper">
+                    <label>Schedule Limit</label>
+                    <div class="combo-input">
+                        <input type="number" name="vice_freq" value="1" min="1">
+                        <div class="slash">/</div>
+                        <select name="vice_per">
+                            <option value="1">Day</option>
+                            <option value="7" selected>Week</option>
+                            <option value="30">Month</option>
+                        </select>
+                    </div>
+                    <div style="font-size:0.7em; color:#666; margin-top:5px; text-align:center">Resetting to defaults (1/Week). Please adjust.</div>
+                </div>
+                
+                <hr style="border:0; border-top:1px solid #333; margin:25px 0;">
+
+                <div class="input-wrapper">
+                    <label>Virtue #1</label>
+                    <input type="text" name="v1name" value=")=====" + u.virtue1_name + R"=====(">
+                    <div class="combo-input" style="margin-top:5px">
+                        <input type="number" name="v1_freq" value="3" min="1">
+                        <div class="slash">/</div>
+                        <select name="v1_per">
+                            <option value="1">Day</option>
+                            <option value="7" selected>Week</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="input-wrapper">
+                    <label>Virtue #2</label>
+                    <input type="text" name="v2name" value=")=====" + u.virtue2_name + R"=====(">
+                    <div class="combo-input" style="margin-top:5px">
+                        <input type="number" name="v2_freq" value="5" min="1">
+                        <div class="slash">/</div>
+                        <select name="v2_per">
+                            <option value="1">Day</option>
+                            <option value="7" selected>Week</option>
+                        </select>
+                    </div>
+                </div>
+
+                <button type="submit">Save Changes</button>
+            </form>
+            <a href="/">Cancel</a>
+        </div>
+    </body>
+    </html>
+    )=====";
+    return html;
+}
+
+std::string render_login(std::string error = "") {
+    std::string html = R"(
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>reCurrency Login</title>
+        <style>
+            body { background: #121212; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+            .box { background: #1e1e1e; padding: 40px; border-radius: 16px; width: 320px; text-align: center; border: 1px solid #333; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+            h2 { color: #4CAF50; margin-top: 0; letter-spacing:-1px; }
+            input { width: 100%; padding: 14px; margin: 8px 0; background: #2c2c2c; border: 1px solid #444; color: white; border-radius: 8px; box-sizing: border-box; transition: 0.2s; font-size: 1em; }
+            input:focus { border-color: #4CAF50; outline: none; background: #333; }
+            button { width: 100%; padding: 14px; background: #4CAF50; border: none; color: white; font-weight: bold; cursor: pointer; border-radius: 8px; margin-top: 20px; font-size: 1em; }
+            button:hover { background: #43a047; }
+            .error { color: #ff5252; font-size: 0.9em; margin-bottom: 10px; }
+            a { color: #888; text-decoration: none; font-size: 0.9em; }
+        </style>
+    </head>
+    <body>
+        <div class="box">
+            <h2>reCurrency</h2>
+            )";
+            if (!error.empty()) html += "<div class='error'>" + error + "</div>";
+            html += R"(
+            <form action="/login" method="POST">
+                <input type="text" name="name" placeholder="Username" required autocomplete="off">
+                <input type="password" name="password" placeholder="Password" required>
+                <button type="submit">Access Account</button>
+            </form>
+            <div style="margin-top:25px">
+                <a href="/signup">New here? <b style="color:#ccc">Sign Contract</b></a>
+            </div>
+        </div>
+    </body>
+    </html>
+    )";
+    return html;
+}
+
+std::string render_feed() {
+    std::string html = "<div class='feed-container'><h3> TRANSACTIONS</h3><div class='feed'>";
+    for (const auto& log : activity_feed) {
+        time_t now = std::time(nullptr);
+        int diff = (int)difftime(now, log.timestamp);
+        std::string time_str;
+        if (diff < 60) time_str = "Now";
+        else if (diff < 3600) time_str = std::to_string(diff/60) + "m";
+        else if (diff < 86400) time_str = std::to_string(diff/3600) + "h";
+        else time_str = std::to_string(diff/86400) + "d";
+
+        html += "<div class='log-item' style='border-left: 2px solid " + log.color + "'>";
+        html += "<div class='log-head'><span class='log-user'>" + log.user_name + "</span> <span class='log-time'>" + time_str + "</span></div>";
+        html += "<div class='log-msg'>" + log.message + "</div>";
+        html += "</div>";
+    }
+    html += "</div></div>";
+    return html;
+}
+
+std::string render_dashboard(std::string current_user_id) {
+    for (auto& [key, user] : users) update_decay(user);
+
+    std::string html = R"(
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>reCurrency</title>
+        <style>
+            body { background: #121212; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; }
+            
+            .header { text-align: center; margin-bottom: 25px; }
+            .header h2 { color: #4CAF50; letter-spacing: -1px; margin: 0; font-weight:800; font-size:1.8em; }
+
+            /* HERO CARD */
+            .hero-card { padding: 25px 30px; margin-bottom: 25px; border-radius: 20px; background: #1e1e1e; border: 1px solid #333; box-shadow: 0 10px 30px rgba(0,0,0,0.2); }
+            .hero-card.locked { background: #2c0b0b; border-color: #ff4444; }
+            
+            /* HEADER LAYOUT */
+            .tag { 
+                font-size: 0.9em; 
+                text-transform: uppercase; 
+                color: #888; 
+                letter-spacing: 0.5px; 
+                font-weight: 700; 
+                display: flex; 
+                justify-content: space-between; 
+                align-items: center; /* Vertical Center Logic */
+                margin-bottom: 15px;
+            }
+
+            .header-right {
+                display: flex;
+                align-items: center; /* Aligns Badge and Icon vertically */
+                gap: 12px;
+            }
+
+            .moderating-badge { 
+                background: #2c2c2c; 
+                padding: 6px 10px; 
+                border-radius: 6px; 
+                color: #bbb; 
+                font-size: 0.85em; 
+                text-transform: none; 
+                border: 1px solid #333; 
+                white-space: nowrap; 
+            }
+            
+            .edit-btn { 
+                text-decoration: none; 
+                color: #444; 
+                font-size: 1.4em; 
+                line-height: 1; /* Removes font padding */
+                transition: color 0.2s; 
+                display: flex; 
+                align-items: center;
+            }
+            .edit-btn:hover { color: #fff; }
+            
+            .household-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 38px; }
+            .mini-card { background: #1e1e1e; padding: 15px; border-radius: 12px; border: 1px solid #333; position:relative; overflow:hidden; }
+            .mini-card::before { content:''; position:absolute; top:0; left:0; width:100%; height:4px; background: var(--accent); }
+            .mini-card.locked { border-color: #ff4444; background: #251010; }
+            
+            .timer { font-size: 2.8em; font-weight: 800; margin: 15px 0; color: #fff; text-align: center; font-variant-numeric: tabular-nums; letter-spacing: -1px; }
+            .mini-timer { font-size: 1.2em; font-weight: 700; color: #ccc; margin: 5px 0; font-variant-numeric: tabular-nums; }
+            
+            .btn { width: 100%; padding: 14px; border: none; border-radius: 10px; font-weight: 700; cursor: pointer; color: white; margin-top: 5px; font-size: 0.95em; transition: 0.2s; }
+            .btn:hover { opacity: 0.9; transform: translateY(-1px); }
+            .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 5px; }
+            
+            .smoke-btn { background: #ff5252; }
+            .virtue1-btn { background: #2196F3; }
+            .virtue2-btn { background: #9c27b0; }
+            .punishment-btn { background: #ff5252; color: white; font-size: 0.8em; padding: 8px; }
+            
+            .progress-bg { height: 8px; background: #333; border-radius: 4px; margin: 20px 0; overflow: hidden; }
+            .progress-fill { height: 100%; transition: width 0.5s; }
+            
+            details { margin-top: 25px; border-top: 1px solid #333; padding-top: 15px; }
+            summary { cursor: pointer; color: #666; font-size: 0.8em; text-transform: uppercase; letter-spacing: 1px; outline: none; font-weight:700; }
+            summary:hover { color: #888; }
+            
+            .feed-container { margin: 20px 0; }
+            .feed-container h3 { color: #666; font-size: 0.8em; letter-spacing: 1px; margin-bottom: 5px; }
+            .feed { background: #161616; border-radius: 12px; height: 160px; overflow-y: auto; padding: 12px; border: 1px solid #333; }
+            .log-item { padding: 8px 10px; margin-bottom: 8px; background: #222; border-radius: 6px; }
+            .log-head { display: flex; justify-content: space-between; font-size: 0.75em; margin-bottom: 2px; }
+            .log-user { font-weight: bold; color: #ccc; }
+            .log-time { color: #666; }
+            .log-msg { color: #aaa; font-size: 0.9em; }
+            
+            .logout { text-align: center; margin-top: 40px; }
+            .logout a { color: #666; text-decoration: none; font-size: 0.8em; }
+        </style>
+        <script>
+            function formatTime(seconds) {
+                if (seconds <= 0) return "<span style='color:#4CAF50'>CLEAN</span>";
+                let d = Math.floor(seconds / 86400);
+                let h = Math.floor((seconds % 86400) / 3600);
+                let m = Math.floor((seconds % 3600) / 60);
+                let s = Math.floor(seconds % 60);
+                return d + "d " + (h<10?"0"+h:h) + ":" + (m<10?"0"+m:m) + ":" + (s<10?"0"+s:s);
+            }
+            function startTimers() {
+                const timers = document.querySelectorAll('.timer, .mini-timer');
+                timers.forEach(t => {
+                    let seconds = parseInt(t.getAttribute('data-seconds'));
+                    if (isNaN(seconds)) return; 
+                    t.innerHTML = formatTime(seconds);
+                    setInterval(() => {
+                        if (seconds > 0) seconds--;
+                        t.innerHTML = formatTime(seconds);
+                    }, 1000);
+                });
+            }
+            window.onload = startTimers;
+        </script>
+    </head>
+    <body>
+        <div class="header"><h2>reCurrency</h2></div>
+    )";
+
+    // 1. ME
+    if (users.count(current_user_id)) {
+        User& u = users[current_user_id];
+        
+        html += "<div class='hero-card " + std::string(u.locked?"locked":"") + "'>";
+        
+        // Flex Header: Name on Left, Group(Badge + Icon) on Right
+        html += "<div class='tag'>";
+        html += "<span>" + u.name + "</span>"; 
+        
+        html += "<div class='header-right'>";
+        html += "<span class='moderating-badge'>Moderating: " + u.vice + "</span>";
+        html += "<a href='/edit' class='edit-btn'>⚙</a>";
+        html += "</div>"; // End Right Group
+        
+        html += "</div>"; // End Tag
+        
+        if (u.locked) {
+            html += "<div class='timer' style='color:#ff5252'>BANKRUPT</div>";
+            html += "<div style='color:#ff9898; text-align:center; font-size:0.9em;'>Account Frozen. Awaiting Bail Out.</div>";
+        } else {
+            html += "<div class='timer' data-seconds='" + std::to_string(u.debt_seconds) + "'>...</div>";
+            
+            double pct = (double)u.debt_seconds / (double)u.max_threshold * 100.0;
+            if (pct>100) pct=100;
+            std::string col = (u.debt_seconds > u.base_cost) ? "#ff9800" : "#4CAF50";
+            
+            html += "<div class='progress-bg'><div class='progress-fill' style='width:"+std::to_string(pct)+"%; background:"+col+"'></div></div>";
+
+            // Threshold Warning (Only shows if > 50% to limit)
+            if (pct > 50.0) {
+                double max_days = (double)u.max_threshold / (double)DAY_SEC;
+                std::stringstream ss_max;
+                ss_max << std::fixed << std::setprecision(1) << max_days;
+                html += "<div style='text-align:center; font-size:0.75em; color:#ff5252; margin-top:-12px; margin-bottom:15px; opacity:0.8; letter-spacing:0.5px;'>⚠ BANKRUPTCY LIMIT: " + ss_max.str() + " DAYS</div>";
+            }
+            
+            html += "<div class='btn-grid'>";
+            html += "<a href='/virtue/1?name="+u.id+"'><button class='btn virtue1-btn'>" + u.virtue1_name + " (-12h)</button></a>";
+            html += "<a href='/virtue/2?name="+u.id+"'><button class='btn virtue2-btn'>" + u.virtue2_name + " (-12h)</button></a>";
+            html += "</div>";
+            
+            double days_d = (double)u.base_cost / (double)DAY_SEC;
+            if (u.debt_seconds > 0) days_d = days_d * 1.5;
+            
+            std::stringstream ss;
+            ss << std::fixed << std::setprecision(1) << days_d;
+            
+            html += "<a href='/vice?name="+u.id+"'><button class='btn smoke-btn'>Indulge (+" + ss.str() + "d)</button></a>";
+            
+            html += "<details><summary>View Weekly Insights</summary>";
+            html += render_calendar(u.name); 
+            html += "</details>";
+        }
+        html += "</div>";
+    }
+
+    // 2. TRANSACTIONS
+    html += render_feed();
+
+    // 3. HOUSEHOLD
+    html += "<div class='household-grid'>";
+    for (auto& [key, u] : users) {
+        if (key == current_user_id) continue;
+        
+        std::string accent = get_user_color(u.name);
+        
+        html += "<div class='mini-card " + std::string(u.locked?"locked":"") + "' style='--accent:" + accent + "'>";
+        html += "<div class='tag'><span>" + u.name + "</span> <span class='streak'>🔥 " + std::to_string(u.streak) + "</span></div>";
+        
+        if (u.locked) {
+            html += "<div class='mini-timer' style='color:#ff5252'>BANKRUPT</div>";
+            html += "<a href='/reset?name="+u.id+"'><button class='btn punishment-btn'>Bail Out</button></a>";
+        } else {
+            html += "<div class='mini-timer' data-seconds='" + std::to_string(u.debt_seconds) + "'>...</div>";
+            html += "<div style='font-size:0.7em; color:#666'>Target: " + u.virtue1_name + " & " + u.virtue2_name + "</div>";
+        }
+        html += "</div>";
+    }
+    html += "</div>";
+
+    html += "<div class='logout'><a href='/logout'>Log Out</a></div>";
+    html += "</body></html>";
+    return html;
+}
+
+// --- ROUTES ---
+
+int main() {
+    load_db();
+    crow::SimpleApp app;
+
+    CROW_ROUTE(app, "/")([](const crow::request& req){
+        std::string user_id = get_logged_in_user(req);
+        if (user_id == "") {
+            crow::response res(302);
+            res.add_header("Location", "/login");
+            return res;
+        }
+        return crow::response(render_dashboard(user_id));
+    });
+
+    CROW_ROUTE(app, "/login")([](const crow::request& req){
+        std::string err = req.url_params.get("error") ? req.url_params.get("error") : "";
+        std::string msg = (err == "invalid") ? "Invalid Credentials" : "";
+        return render_login(msg);
+    });
+
+    CROW_ROUTE(app, "/signup")([](const crow::request& req){
+        std::string err = req.url_params.get("error") ? req.url_params.get("error") : "";
+        std::string msg = (err == "exists") ? "Name taken" : "";
+        return render_signup_wizard(msg);
+    });
+
+    CROW_ROUTE(app, "/edit")([](const crow::request& req){
+        std::string user_id = get_logged_in_user(req);
+        if (user_id == "" || users.find(user_id) == users.end()) {
+             crow::response res(302);
+             res.add_header("Location", "/login");
+             return res;
+        }
+        return crow::response(render_edit_page(users[user_id]));
+    });
+
+    CROW_ROUTE(app, "/edit").methods(crow::HTTPMethod::POST)([](const crow::request& req){
+        std::string name = get_logged_in_user(req);
+        if (name == "" || users.find(name) == users.end()) {
+             crow::response res(302);
+             res.add_header("Location", "/login");
+             return res;
+        }
+        
+        std::string vice = get_form_value(req.body, "vice");
+        
+        double vice_freq = std::stod(get_form_value(req.body, "vice_freq"));
+        double vice_per = std::stod(get_form_value(req.body, "vice_per"));
+        double days_interval = vice_per / vice_freq;
+
+        std::string v1n = get_form_value(req.body, "v1name");
+        double v1_freq = std::stod(get_form_value(req.body, "v1_freq"));
+        double v1_per = std::stod(get_form_value(req.body, "v1_per"));
+        double v1_weekly = (v1_freq / v1_per) * 7.0;
+
+        std::string v2n = get_form_value(req.body, "v2name");
+        double v2_freq = std::stod(get_form_value(req.body, "v2_freq"));
+        double v2_per = std::stod(get_form_value(req.body, "v2_per"));
+        double v2_weekly = (v2_freq / v2_per) * 7.0;
+
+        try {
+            User& u = users[name];
+            u.vice = vice;
+            u.target_interval_days = days_interval;
+            u.virtue1_name = v1n;
+            u.promised_v1_weekly = v1_weekly;
+            u.virtue2_name = v2n;
+            u.promised_v2_weekly = v2_weekly;
+            
+            u.calculate_math();
+            save_db();
+        } catch (...) {}
+        
+        crow::response res(302);
+        res.add_header("Location", "/");
+        return res;
+    });
+
+    CROW_ROUTE(app, "/login").methods(crow::HTTPMethod::POST)([](const crow::request& req){
+        std::string name = get_form_value(req.body, "name");
+        std::string pass = get_form_value(req.body, "password");
+        
+        std::string id = name;
+        std::transform(id.begin(), id.end(), id.begin(), ::tolower);
+
+        crow::response res(302);
+        if (users.count(id) && users[id].password == pass) {
+            res.add_header("Set-Cookie", "user=" + id + "; Path=/; HttpOnly; Max-Age=31536000");
+            res.add_header("Location", "/");
+        } else {
+            res.add_header("Location", "/login?error=invalid");
+        }
+        return res;
+    });
+
+    CROW_ROUTE(app, "/signup").methods(crow::HTTPMethod::POST)([](const crow::request& req){
+        std::string name = get_form_value(req.body, "name");
+        std::string pass = get_form_value(req.body, "password");
+        std::string vice = get_form_value(req.body, "vice");
+        
+        double vice_freq = std::stod(get_form_value(req.body, "vice_freq"));
+        double vice_per = std::stod(get_form_value(req.body, "vice_per"));
+        double days_interval = vice_per / vice_freq;
+
+        std::string v1n = get_form_value(req.body, "v1name");
+        double v1_freq = std::stod(get_form_value(req.body, "v1_freq"));
+        double v1_per = std::stod(get_form_value(req.body, "v1_per"));
+        double v1_weekly = (v1_freq / v1_per) * 7.0;
+
+        std::string v2n = get_form_value(req.body, "v2name");
+        double v2_freq = std::stod(get_form_value(req.body, "v2_freq"));
+        double v2_per = std::stod(get_form_value(req.body, "v2_per"));
+        double v2_weekly = (v2_freq / v2_per) * 7.0;
+
+        std::string id = name;
+        std::transform(id.begin(), id.end(), id.begin(), ::tolower);
+
+        crow::response res(302);
+        if (users.count(id)) {
+            res.add_header("Location", "/signup?error=exists");
+            return res;
+        }
+
+        users[id] = User(name, pass, vice, days_interval, v1n, v1_weekly, v2n, v2_weekly);
+        save_db();
+        res.add_header("Set-Cookie", "user=" + id + "; Path=/; HttpOnly; Max-Age=31536000");
+        res.add_header("Location", "/");
+        return res;
+    });
+
+    CROW_ROUTE(app, "/logout")([](){
+        crow::response res(302);
+        res.add_header("Set-Cookie", "user=; Path=/; Max-Age=0");
+        res.add_header("Location", "/login");
+        return res;
+    });
+
+    CROW_ROUTE(app, "/vice")([](const crow::request& req){
+        auto name = req.url_params.get("name");
+        std::string cur_id = get_logged_in_user(req);
+        if (name && cur_id == name) add_vice(users[name]);
+        crow::response res(302);
+        res.add_header("Location", "/");
+        return res;
+    });
+
+    CROW_ROUTE(app, "/virtue/1")([](const crow::request& req){
+        auto name = req.url_params.get("name");
+        std::string cur_id = get_logged_in_user(req);
+        if (name && cur_id == name) perform_virtue(users[name], 1);
+        crow::response res(302);
+        res.add_header("Location", "/");
+        return res;
+    });
+
+    CROW_ROUTE(app, "/virtue/2")([](const crow::request& req){
+        auto name = req.url_params.get("name");
+        std::string cur_id = get_logged_in_user(req);
+        if (name && cur_id == name) perform_virtue(users[name], 2);
+        crow::response res(302);
+        res.add_header("Location", "/");
+        return res;
+    });
+
+    CROW_ROUTE(app, "/reset")([](const crow::request& req){
+        auto target_id = req.url_params.get("name");
+        std::string cur_id = get_logged_in_user(req);
+        if (target_id && !cur_id.empty() && users.count(target_id) && cur_id != std::string(target_id)) {
+            reset_user(users[target_id], users[cur_id].name);
+        }
+        crow::response res(302);
+        res.add_header("Location", "/");
+        return res;
+    });
+
+    app.port(18080).multithreaded().run();
+}
