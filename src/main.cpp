@@ -10,6 +10,7 @@
 #include <deque>
 #include <iomanip>
 #include <cmath>
+#include <cstdlib>
 
 using json = nlohmann::json;
 
@@ -18,7 +19,13 @@ const long long DAY_SEC = 86400;
 const long long HALF_DAY = 43200; 
 const long long VIRTUE_REWARD = HALF_DAY; 
 const long long ACTION_COOLDOWN = 72000;     // 20 Hours
-const std::string DB_FILE = "/data/db.json";
+
+// Dynamic DB Path
+std::string get_db_path() {
+    const char* env_p = std::getenv("DB_PATH");
+    return env_p ? std::string(env_p) : "/data/db.json";
+}
+const std::string DB_FILE = get_db_path();
 
 // --- DATA STRUCTURES ---
 
