@@ -1,6 +1,6 @@
 # reCurrency
 
-**reCurrency** is a tool to moderate bad habits.
+a tool to moderate vices with virtues.
 
 ## live demo
 https://recurrency-demo.onrender.com
