@@ -15,7 +15,7 @@ reCurrency allows users to sign a **social contract** by doing the following:
 the system calculates a personalized **base cost** for every indulgence (sober days). completing your virtue pays it off. 
 but, if you exceed 2.5x your base cost, you go **bankrupt** and need a friend to bail you out.
 
-## tech stack
+## stack
 *   **language:** c++17
 *   **server:** crow (microframework)
 *   **data:** json (persistent volume storage)
