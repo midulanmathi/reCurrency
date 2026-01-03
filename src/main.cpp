@@ -820,6 +820,20 @@ std::string render_edit_page(const User& u) {
                     </div>
                 </div>
 
+                <hr style="border:0; border-top:1px solid #333; margin:25px 0;">
+                
+                        <div class="input-wrapper">
+                            <label>Change Password</label>
+                            <input type="password" name="new_password" placeholder="Leave blank to keep current">
+                        </div>
+
+                        <button type="submit">Save Changes</button>
+                    </form>
+                    
+                    <form action="/delete_account" method="POST" onsubmit="return confirm('Are you sure? This cannot be undone.');">
+                        <button type="submit" style="background:transparent; border:1px solid #ff5252; color:#ff5252; margin-top:20px;">Delete Account</button>
+                    </form>
+                        
                 <button type="submit">Save Changes</button>
             </form>
             <a href="/">Cancel</a>
@@ -1194,6 +1208,7 @@ int main() {
         }
         
         std::string vice = get_form_value(req.body, "vice");
+        std::string new_pass = get_form_value(req.body, "new_password");
         
         double vice_freq = std::stod(get_form_value(req.body, "vice_freq"));
         double vice_per = std::stod(get_form_value(req.body, "vice_per"));
@@ -1211,6 +1226,12 @@ int main() {
 
         try {
             User& u = users[name];
+            
+            // NEW: Update Password if provided
+            if (!new_pass.empty()) {
+                u.password = new_pass;
+            }
+
             u.vice = vice;
             u.target_interval_days = days_interval;
             u.virtue1_name = v1n;
@@ -1336,5 +1357,34 @@ int main() {
         return res;
     });
 
+    CROW_ROUTE(app, "/delete_account").methods(crow::HTTPMethod::POST)([](const crow::request& req){
+        std::string name = get_logged_in_user(req);
+        if (name != "" && users.count(name)) {
+            // 1. Remove User
+            users.erase(name);
+            
+            // 2. Cleanup Logs (Optional: Remove logs belonging to this user)
+            // We use a new deque to filter out the deleted user's logs
+            std::deque<ActivityLog> new_feed;
+            for (const auto& log : activity_feed) {
+                if (log.user_name != name) { // Note: log.user_name stores the Display Name, 'name' here is ID
+                    // This creates a slight mismatch issue if Display Name != ID.
+                    // To be safe, we just keep the logs for history, or strictly check IDs if stored.
+                    // For this MVP, let's just keep the logs or simple filter:
+                    new_feed.push_back(log); 
+                }
+            }
+            // If you want to wipe their history, uncomment:
+            // activity_feed = new_feed; 
+            
+            save_db();
+        }
+        
+        crow::response res(302);
+        res.add_header("Set-Cookie", "user=; Path=/; Max-Age=0"); // Clear Cookie
+        res.add_header("Location", "/login");
+        return res;
+    });
+    
     app.port(18080).multithreaded().run();
 }
