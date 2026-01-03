@@ -626,7 +626,7 @@ std::string render_signup_wizard(std::string error = "") {
                         <input type="text" name="name" placeholder="Name" required autocomplete="off">
                     </div>
                     <div class="input-wrapper">
-                        <label>Secure Key</label>
+                        <label>Password</label>
                         <input type="password" name="password" placeholder="Password" required>
                     </div>
                     <div class="btn-row" style="justify-content:center">
@@ -638,7 +638,7 @@ std::string render_signup_wizard(std::string error = "") {
                 <div id="step2" class="step">
                     <h2>The Vice</h2>
                     <p class="desc">What is your biggest vice? How often will you indulge?<br>
-                                    This will help define how much debt you owe for every indulgence. </p>
+                                    This will help define how much you owe for every indulgence. </p>
                     
                     <div class="input-wrapper">
                         <label title="The specific activity (e.g. Smoking Weed, Ordering UberEats)">Vice Name <span class="info-icon">?</span></label>
@@ -668,8 +668,7 @@ std::string render_signup_wizard(std::string error = "") {
 
                 <div id="step3" class="step">
                     <h2>The Virtues</h2>
-                    <p class="desc">Pick two virtues to earn your indulgence.<br>
-                    Let these be the habits you wish to increase the frequency of.</p>
+                    <p class="desc">Pick two virtues to earn your indulgence. These are the habits that you want to have.</p>
                     
                     <div class="input-wrapper">
                         <label title="A daily/weekly positive habit (e.g. Gym)">Virtue #1 <span class="info-icon">?</span></label>

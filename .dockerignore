@@ -1,0 +1,16 @@
+# flyctl launch added from .gitignore
+# Ignore the database (User Data)
+**/db.json
+
+# Ignore the executable (Mac/Linux)
+**/recurrency
+
+# Ignore the executable (Windows)
+**/recurrency.exe
+
+# Mac OS junk files
+**/.DS_Store
+
+# VS Code settings (optional, but good practice)
+**/.vscode
+fly.toml
