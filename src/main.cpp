@@ -299,7 +299,7 @@ bool perform_virtue(User& u, int virtue_num) {
     *last_track = now;
     std::string col = (virtue_num == 1) ? "#2196F3" : "#9c27b0";
     std::string action_key = (virtue_num == 1) ? "virtue1" : "virtue2";
-    add_log(u.name, action_key, "Completed: " + v_name + " (-12h)", col, -removed, u.debt_seconds);
+    add_log(u.name, action_key, "Completed: " + v_name + " (-1d)", col, -removed, u.debt_seconds);
     save_db();
     return true;
 }
@@ -1110,8 +1110,8 @@ std::string render_dashboard(std::string current_user_id) {
             }
             
             html += "<div class='btn-grid'>";
-            html += "<a href='/virtue/1?name="+u.id+"'><button class='btn virtue1-btn'>" + u.virtue1_name + " (-12h)</button></a>";
-            html += "<a href='/virtue/2?name="+u.id+"'><button class='btn virtue2-btn'>" + u.virtue2_name + " (-12h)</button></a>";
+            html += "<a href='/virtue/1?name="+u.id+"'><button class='btn virtue1-btn'>" + u.virtue1_name + " (-1d)</button></a>";
+            html += "<a href='/virtue/2?name="+u.id+"'><button class='btn virtue2-btn'>" + u.virtue2_name + " (-1d)</button></a>";
             html += "</div>";
             
             double days_d = (double)u.base_cost / (double)DAY_SEC;
