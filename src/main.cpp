@@ -17,7 +17,7 @@ using json = nlohmann::json;
 // --- CONSTANTS ---
 const long long DAY_SEC = 86400;
 const long long HALF_DAY = 43200; 
-const long long VIRTUE_REWARD = HALF_DAY; 
+const long long VIRTUE_REWARD = DAY_SEC; 
 const long long ACTION_COOLDOWN = 72000;     // 20 Hours
 
 // Dynamic DB Path
@@ -765,12 +765,18 @@ std::string render_edit_page(const User& u) {
             
             button { width: 100%; padding: 14px; background: #4CAF50; border: none; color: white; font-weight: bold; cursor: pointer; border-radius: 8px; margin-top: 10px; font-size: 1em; text-transform:uppercase; letter-spacing:1px; transition:0.1s; }
             button:active { transform: scale(0.98); }
+            
+            .del-btn { background: transparent; border: 1px solid #ff5252; color: #ff5252; margin-top: 20px; font-size: 0.9em; }
+            .del-btn:hover { background: rgba(255, 82, 82, 0.1); }
+            
             a { display:block; text-align:center; margin-top:15px; color:#666; text-decoration:none; text-transform:uppercase; font-size:0.8em; }
         </style>
     </head>
     <body>
         <div class="box">
             <h2>Amend Contract</h2>
+            
+            <!-- MAIN EDIT FORM -->
             <form action="/edit" method="POST">
                 
                 <div class="input-wrapper">
@@ -792,7 +798,7 @@ std::string render_edit_page(const User& u) {
                     <div style="font-size:0.7em; color:#666; margin-top:5px; text-align:center">Resetting to defaults. Please re-enter desired rate.</div>
                 </div>
                 
-                <hr style="border:0; border-top:1px solid #333; margin:25px 0;">
+                <hr style="border:0; border-top:1px solid #444; margin:25px 0;">
 
                 <div class="input-wrapper">
                     <label>Virtue #1</label>
@@ -819,23 +825,22 @@ std::string render_edit_page(const User& u) {
                         </select>
                     </div>
                 </div>
-
-                <hr style="border:0; border-top:1px solid #333; margin:25px 0;">
                 
-                        <div class="input-wrapper">
-                            <label>Change Password</label>
-                            <input type="password" name="new_password" placeholder="Leave blank to keep current">
-                        </div>
+                <hr style="border:0; border-top:1px solid #444; margin:25px 0;">
+                
+                <div class="input-wrapper">
+                    <label>New Password</label>
+                    <input type="password" name="new_password" placeholder="Leave blank to keep current">
+                </div>
 
-                        <button type="submit">Save Changes</button>
-                    </form>
-                    
-                    <form action="/delete_account" method="POST" onsubmit="return confirm('Are you sure? This cannot be undone.');">
-                        <button type="submit" style="background:transparent; border:1px solid #ff5252; color:#ff5252; margin-top:20px;">Delete Account</button>
-                    </form>
-                        
                 <button type="submit">Save Changes</button>
             </form>
+            
+            <!-- SEPARATE DELETE FORM -->
+            <form action="/delete_account" method="POST" onsubmit="return confirm('Are you sure? This cannot be undone.');">
+                <button type="submit" class="del-btn">Delete Account</button>
+            </form>
+            
             <a href="/">Cancel</a>
         </div>
     </body>
